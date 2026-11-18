@@ -190,6 +190,7 @@ impl ATTManager {
     }
 
     pub async fn read(&self, handle: ATTHandles) -> Result<Vec<u8>> {
+        self.drain_stale_responses().await;
         let lsb = (handle as u16 & 0xFF) as u8;
         let msb = ((handle as u16 >> 8) & 0xFF) as u8;
         let pdu = vec![OPCODE_READ_REQUEST, lsb, msb];
@@ -198,6 +199,7 @@ impl ATTManager {
     }
 
     pub async fn write(&self, handle: ATTHandles, value: &[u8]) -> Result<()> {
+        self.drain_stale_responses().await;
         let lsb = (handle as u16 & 0xFF) as u8;
         let msb = ((handle as u16 >> 8) & 0xFF) as u8;
         let mut pdu = vec![OPCODE_WRITE_REQUEST, lsb, msb];
@@ -208,6 +210,7 @@ impl ATTManager {
     }
 
     async fn write_cccd(&self, handle: ATTCCCDHandles, value: &[u8]) -> Result<()> {
+        self.drain_stale_responses().await;
         let lsb = (handle as u16 & 0xFF) as u8;
         let msb = ((handle as u16 >> 8) & 0xFF) as u8;
         let mut pdu = vec![OPCODE_WRITE_REQUEST, lsb, msb];
@@ -234,6 +237,19 @@ impl ATTManager {
                 std::io::ErrorKind::NotConnected,
                 "L2CAP stream not connected",
             )))
+        }
+    }
+
+    /// Drops responses that arrived after an earlier request timed out, so they
+    /// cannot be mistaken for the reply to the next request.
+    async fn drain_stale_responses(&self) {
+        let mut rx = self.response_rx.lock().await;
+        let mut dropped = 0usize;
+        while rx.try_recv().is_ok() {
+            dropped += 1;
+        }
+        if dropped > 0 {
+            debug!("Dropped {} stale ATT response(s) before new request", dropped);
         }
     }
 
@@ -352,5 +368,16 @@ mod tests {
                 value: vec![0x01, 0x02]
             }
         );
+    }
+
+    #[tokio::test]
+    async fn drain_stale_responses_empties_channel() {
+        let manager = ATTManager::new();
+        manager.response_tx.send(Ok(vec![0xAA])).unwrap();
+
+        manager.drain_stale_responses().await;
+
+        let mut rx = manager.response_rx.lock().await;
+        assert!(rx.try_recv().is_err());
     }
 }
