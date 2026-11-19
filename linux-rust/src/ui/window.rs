@@ -6,7 +6,7 @@ use crate::devices::enums::{
     AirPodsNoiseControlMode, AirPodsState, DeviceData, DeviceState, DeviceType, NothingAncMode,
     NothingState,
 };
-use crate::ui::airpods::airpods_view;
+use crate::ui::airpods::{airpods_view, run_async_in_thread};
 use crate::ui::messages::BluetoothUIMessage;
 use crate::ui::nothing::nothing_view;
 use crate::utils::{MyTheme, get_app_settings_path, get_devices_path};
@@ -20,12 +20,14 @@ use iced::widget::{
     text_input, toggler
 };
 use iced::{Background, Border, Center, Element, Font, Length, Padding, Size, Subscription, Task, Theme, daemon, window, Settings, Program};
-use log::{debug, error};
+use log::{debug, error, info};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::{Mutex, RwLock};
+use tokio::time::sleep;
 
 pub fn start_ui(
     ui_rx: UnboundedReceiver<BluetoothUIMessage>,
@@ -108,6 +110,10 @@ pub enum Message {
     StateChanged(String, DeviceState),
     TrayTextModeChanged(bool), // yes, I know I should add all settings to a struct, but I'm lazy
     StemControlChanged(bool),
+    /// Ask the AirPods to hand control back from the other connected device.
+    ReverseHandover(String), // mac of the AirPods device
+    /// Re-enable the Reverse button after a handover attempt.
+    ReverseHandoverFinished(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -270,6 +276,10 @@ impl App {
 
                         Task::perform(wait_for_message(ui_rx), |msg| msg)
                     }
+                    BluetoothUIMessage::ChannelClosed => {
+                        error!("Bluetooth backend stopped; UI will no longer receive updates");
+                        Task::none()
+                    }
                     BluetoothUIMessage::OpenWindow => {
                         let ui_rx = Arc::clone(&self.ui_rx);
                         let wait_task = Task::perform(wait_for_message(ui_rx), |msg| msg);
@@ -346,6 +356,7 @@ impl App {
                                 };
                                 self.device_states.insert(mac.clone(), DeviceState::AirPods(AirPodsState {
                                     device_name,
+                                    local_mac: state.local_mac.clone().unwrap_or_default(),
                                     battery: state.battery_info.clone(),
                                     noise_control_mode: state.control_command_status_list.iter().find_map(|status| {
                                         if status.identifier == ControlCommandIdentifiers::ListeningMode {
@@ -382,6 +393,12 @@ impl App {
                                         status.identifier == ControlCommandIdentifiers::AllowOffOption &&
                                         matches!(status.value.as_slice(), [0x01])
                                     }),
+                                    // `owns` starts out false before the AirPods
+                                    // report their ownership state, so don't treat
+                                    // that as a takeover on startup.
+                                    ownership_lost: false,
+                                    other_device_mac: None,
+                                    reverse_in_progress: false,
                                 }));
                             }
                             Some(DeviceType::Nothing) => {
@@ -505,10 +522,64 @@ impl App {
                                         });
                                     }
                                 }
+                                ControlCommandIdentifiers::OwnsConnection => {
+                                    let owns = status.value.first().copied().unwrap_or(0) != 0;
+                                    debug!("OwnsConnection status: {}", owns);
+                                    if let Some(DeviceState::AirPods(state)) =
+                                        self.device_states.get_mut(&mac)
+                                    {
+                                        state.ownership_lost = !owns;
+                                        // Do NOT clear other_device_mac here; keep the
+                                        // last known other-device MAC so that a subsequent
+                                        // Reverse handover can target it even if the
+                                        // iPhone takes over again before OwnershipToFalseRequest fires.
+                                        state.reverse_in_progress = false;
+                                    }
+                                }
                                 _ => {
                                     debug!("Unhandled Control Command Status: {:?}", status);
                                 }
                             },
+                            AACPEvent::AudioSource(source) => {
+                                if let Some(DeviceState::AirPods(state)) =
+                                    self.device_states.get_mut(&mac)
+                                    && source.r#type != crate::bluetooth::aacp::AudioSourceType::None
+                                {
+                                    if source.mac.eq_ignore_ascii_case(&state.local_mac) {
+                                        debug!(
+                                            "Audio source is this machine ({}), ownership regained",
+                                            source.mac
+                                        );
+                                        state.ownership_lost = false;
+                                        state.reverse_in_progress = false;
+                                    } else {
+                                        debug!(
+                                            "Audio source is another device ({}), showing reverse banner",
+                                            source.mac
+                                        );
+                                        state.ownership_lost = true;
+                                        state.other_device_mac = Some(source.mac.clone());
+                                    }
+                                }
+                            }
+                            AACPEvent::OwnershipToFalseRequest {
+                                other_mac,
+                                reason_reverse_tapped,
+                            } => {
+                                debug!(
+                                    "Ownership lost to {:?} (reverse tapped: {})",
+                                    other_mac, reason_reverse_tapped
+                                );
+                                if let Some(DeviceState::AirPods(state)) =
+                                    self.device_states.get_mut(&mac)
+                                {
+                                    let resolved =
+                                        other_mac.or_else(|| state.other_device_mac.clone());
+                                    state.ownership_lost = true;
+                                    state.other_device_mac = resolved;
+                                    state.reverse_in_progress = false;
+                                }
+                            }
                             AACPEvent::BatteryInfo(battery_info) => {
                                 if let Some(DeviceState::AirPods(state)) =
                                     self.device_states.get_mut(&mac)
@@ -654,6 +725,100 @@ impl App {
                     settings
                 );
                 std::fs::write(app_settings_path, settings.to_string()).ok();
+                Task::none()
+            }
+            Message::ReverseHandover(mac) => {
+                let (other_mac, ownership_lost, was_in_progress) = {
+                    self.device_states
+                        .get(&mac)
+                        .and_then(|state| match state {
+                            DeviceState::AirPods(state) => Some((
+                                state.other_device_mac.clone(),
+                                state.ownership_lost,
+                                state.reverse_in_progress,
+                            )),
+                            _ => None,
+                        })
+                        .unwrap_or((None, false, false))
+                };
+                let managers = Arc::clone(&self.device_managers);
+
+                info!(
+                    "ReverseHandover clicked for {}: ownership_lost={}, other_device_mac={:?}, reverse_in_progress={}",
+                    mac, ownership_lost, other_mac.clone(), was_in_progress,
+                );
+
+                if let Some(DeviceState::AirPods(state)) = self.device_states.get_mut(&mac) {
+                    state.reverse_in_progress = true;
+                }
+
+                let airpods_mac = mac.clone();
+                run_async_in_thread(async move {
+                    let (aacp_manager, media_controller) = {
+                        let guard = managers.read().await;
+                        (
+                            guard.get(&airpods_mac).and_then(|d| d.get_aacp()),
+                            guard.get(&airpods_mac).and_then(|d| d.get_media_controller()),
+                        )
+                    };
+
+                    let (Some(aacp_manager), Some(media_controller)) =
+                        (aacp_manager, media_controller)
+                    else {
+                        error!("Missing AACP or media manager for {}", airpods_mac);
+                        return;
+                    };
+
+                    let self_mac = media_controller.lock().await.local_mac().await;
+                    let target_mac = match other_mac {
+                        Some(mac) => Some(mac),
+                        None => {
+                            let state = aacp_manager.state.lock().await;
+                            state
+                                .connected_devices
+                                .iter()
+                                .find(|device| {
+                                    device.mac != self_mac && device.mac != airpods_mac
+                                })
+                                .map(|device| device.mac.clone())
+                        }
+                    };
+                    let Some(target_mac) = target_mac else {
+                        error!("No other connected device found to reverse the handover");
+                        return;
+                    };
+                    info!("Reversing handover from {} to {}", self_mac, target_mac);
+                    if let Err(e) = aacp_manager
+                        .send_reverse_handover(&self_mac, &target_mac)
+                        .await
+                    {
+                        error!("Failed to send reverse handover packets: {}", e);
+                        return;
+                    }
+                    media_controller.lock().await.activate_a2dp_profile().await;
+                    sleep(Duration::from_millis(500)).await;
+                    media_controller.lock().await.resume_playback().await;
+                });
+
+                let timeout_mac = mac.clone();
+                Task::perform(
+                    async {
+                        sleep(Duration::from_secs(5)).await;
+                    },
+                    move |_| Message::ReverseHandoverFinished(timeout_mac.clone()),
+                )
+            }
+            Message::ReverseHandoverFinished(mac) => {
+                if let Some(DeviceState::AirPods(state)) = self.device_states.get_mut(&mac) {
+                    // Only clear the in-flight flag. Keep `ownership_lost` and
+                    // `other_device_mac` so the banner stays visible and a
+                    // retry can target the same device; they are cleared by
+                    // the `OwnsConnection` / `AudioSource` handlers when
+                    // ownership actually returns to us.
+                    if state.reverse_in_progress {
+                        state.reverse_in_progress = false;
+                    }
+                }
                 Task::none()
             }
         }
@@ -1309,10 +1474,7 @@ async fn wait_for_message(ui_rx: Arc<Mutex<UnboundedReceiver<BluetoothUIMessage>
     let mut rx = ui_rx.lock().await;
     match rx.recv().await {
         Some(msg) => Message::BluetoothMessage(msg),
-        None => {
-            error!("UI message channel closed");
-            Message::BluetoothMessage(BluetoothUIMessage::NoOp)
-        }
+        None => Message::BluetoothMessage(BluetoothUIMessage::ChannelClosed),
     }
 }
 

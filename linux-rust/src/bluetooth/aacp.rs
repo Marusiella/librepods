@@ -304,7 +304,10 @@ pub enum AACPEvent {
     ProximityKeys(Vec<(u8, Vec<u8>)>),
     AudioSource(AudioSource),
     ConnectedDevices(Vec<ConnectedDevice>, Vec<ConnectedDevice>),
-    OwnershipToFalseRequest,
+    OwnershipToFalseRequest {
+        other_mac: Option<String>,
+        reason_reverse_tapped: bool,
+    },
     StemPress(StemPressType, StemPressBudType),
 }
 
@@ -323,6 +326,14 @@ pub struct AACPManagerState {
     pub old_connected_devices: Vec<ConnectedDevice>,
     pub connected_devices: Vec<ConnectedDevice>,
     pub audio_source: Option<AudioSource>,
+    /// Last audio source that was actually streaming (type != None). The
+    /// AirPods emit transient `AudioSource { type: None }` packets while
+    /// switching, which must not be mistaken for "nobody is streaming".
+    pub last_active_audio_source: Option<AudioSource>,
+    pub last_active_audio_source_at: Option<std::time::Instant>,
+    /// This machine's adapter address, filled in by the AirPods device once it
+    /// knows the local MAC.
+    pub local_mac: Option<String>,
     pub battery_info: Vec<BatteryInfo>,
     pub conversational_awareness_status: u8,
     pub old_ear_detection_status: Vec<EarDetectionStatus>,
@@ -346,6 +357,9 @@ impl AACPManagerState {
             old_connected_devices: Vec::new(),
             connected_devices: Vec::new(),
             audio_source: None,
+            last_active_audio_source: None,
+            last_active_audio_source_at: None,
+            local_mac: None,
             battery_info: Vec::new(),
             conversational_awareness_status: 0,
             old_ear_detection_status: Vec::new(),
@@ -850,6 +864,14 @@ impl AACPManager {
                 let typ = AudioSourceType::from_u8(payload[8]).unwrap_or(AudioSourceType::None);
                 let audio_source = AudioSource { mac, r#type: typ };
                 let mut state = self.state.lock().await;
+                // Remember the last source that was really streaming. The
+                // AirPods send intermittent `type: None` packets, and treating
+                // those as "free to take over" makes LibrePods fight the other
+                // device for ownership.
+                if audio_source.r#type != AudioSourceType::None {
+                    state.last_active_audio_source = Some(audio_source.clone());
+                    state.last_active_audio_source_at = Some(std::time::Instant::now());
+                }
                 state.audio_source = Some(audio_source.clone());
                 if let Some(ref tx) = state.event_tx {
                     let _ = tx.send(AACPEvent::AudioSource(audio_source));
@@ -906,11 +928,47 @@ impl AACPManager {
             }
             opcodes::SMART_ROUTING_RESP => {
                 let packet_string = String::from_utf8_lossy(&payload[2..]);
-                info!("Received Smart Routing Response: {}", packet_string);
+                // The sender MAC is stored reversed right after the opcode/flag
+                // bytes, exactly where Android reads it from the full packet.
+                let sender_mac = if payload.len() >= 8 {
+                    Some(format!(
+                        "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                        payload[7], payload[6], payload[5], payload[4], payload[3], payload[2]
+                    ))
+                } else {
+                    None
+                };
+                info!(
+                    "Received Smart Routing Response from {:?}: {}",
+                    sender_mac, packet_string
+                );
                 if packet_string.contains("SetOwnershipToFalse") {
                     info!("Received OwnershipToFalse request");
-                    if let Some(ref tx) = self.state.lock().await.event_tx {
-                        let _ = tx.send(AACPEvent::OwnershipToFalseRequest);
+                    let reason_reverse_tapped = packet_string.contains("ReverseBannerTapped");
+                    let state = self.state.lock().await;
+                    // Don't require the sender to appear in `connected_devices`:
+                    // the AirPods frequently list only this host there, even when
+                    // an iPhone is connected and streaming. Just discard
+                    // impossible addresses (all-zero, the AirPods themselves or
+                    // this adapter).
+                    let sender_mac = sender_mac.filter(|mac| {
+                        let mac = mac.as_str();
+                        mac != "00:00:00:00:00:00"
+                            && state
+                                .airpods_mac
+                                .map(|addr| !addr.to_string().eq_ignore_ascii_case(mac))
+                                .unwrap_or(true)
+                            && state
+                                .local_mac
+                                .as_deref()
+                                .map(|local| !local.eq_ignore_ascii_case(mac))
+                                .unwrap_or(true)
+                    });
+                    if let Some(ref tx) = state.event_tx {
+                        let _ = tx.send(AACPEvent::OwnershipToFalseRequest {
+                            other_mac: sender_mac,
+                            reason_reverse_tapped,
+                        });
                     }
                 }
             }
@@ -1160,6 +1218,25 @@ impl AACPManager {
 
         let packet = [opcode.as_slice(), buffer.as_slice()].concat();
         self.send_data_packet(&packet).await
+    }
+
+    /// Take control of the AirPods back from another device (e.g. an iPhone)
+    /// that took ownership. Mirrors Android's `takeOver("reverse")` flow:
+    /// claim ownership, announce media information and send the reverse packet.
+    /// The target MAC is byte-reversed inside the packet builders, as required
+    /// by the AirPods smart-routing protocol.
+    pub async fn send_reverse_handover(
+        &self,
+        self_mac_address: &str,
+        target_mac_address: &str,
+    ) -> Result<()> {
+        self.send_control_command(ControlCommandIdentifiers::OwnsConnection, &[0x01])
+            .await?;
+        // Android's `takeOver("reverse")` announces itself with
+        // `HostStreamingState = NO`; audio is activated separately afterwards.
+        self.send_media_information(self_mac_address, target_mac_address, false)
+            .await?;
+        self.send_hijack_reversed(target_mac_address).await
     }
 
     pub async fn send_add_tipi_device(

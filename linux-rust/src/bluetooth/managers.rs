@@ -1,10 +1,13 @@
 use crate::bluetooth::aacp::AACPManager;
 use crate::bluetooth::att::ATTManager;
+use crate::media_controller::MediaController;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub struct DeviceManagers {
     att: Option<Arc<ATTManager>>,
     aacp: Option<Arc<AACPManager>>,
+    media_controller: Option<Arc<Mutex<MediaController>>>,
 }
 
 impl DeviceManagers {
@@ -12,6 +15,7 @@ impl DeviceManagers {
         Self {
             att: None,
             aacp: Some(Arc::new(aacp)),
+            media_controller: None,
         }
     }
 
@@ -19,6 +23,7 @@ impl DeviceManagers {
         Self {
             att: Some(Arc::new(att)),
             aacp: None,
+            media_controller: None,
         }
     }
 
@@ -27,6 +32,7 @@ impl DeviceManagers {
         Self {
             att: Some(Arc::new(att)),
             aacp: Some(Arc::new(aacp)),
+            media_controller: None,
         }
     }
 
@@ -44,5 +50,13 @@ impl DeviceManagers {
 
     pub fn get_att(&self) -> Option<Arc<ATTManager>> {
         self.att.clone()
+    }
+
+    pub fn set_media_controller(&mut self, media_controller: Arc<Mutex<MediaController>>) {
+        self.media_controller = Some(media_controller);
+    }
+
+    pub fn get_media_controller(&self) -> Option<Arc<Mutex<MediaController>>> {
+        self.media_controller.clone()
     }
 }

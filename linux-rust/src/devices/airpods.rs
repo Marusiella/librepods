@@ -1,5 +1,7 @@
 use crate::bluetooth::aacp::ControlCommandIdentifiers;
-use crate::bluetooth::aacp::{AACPEvent, AACPManager, AirPodsLEKeys, ProximityKeyType};
+use crate::bluetooth::aacp::{
+    AACPEvent, AACPManager, AirPodsLEKeys, AudioSourceType, ProximityKeyType,
+};
 use crate::media_controller::MediaController;
 use crate::ui::messages::BluetoothUIMessage;
 use crate::ui::tray::MyTray;
@@ -118,6 +120,13 @@ impl AirPodsDevice {
             .expect("Failed to get adapter address")
             .to_string();
 
+        {
+            // Let the AACP layer (and the UI) tell this machine's own audio
+            // source apart from another device's.
+            let mut state = aacp_manager.state.lock().await;
+            state.local_mac = Some(local_mac.clone());
+        }
+
         let media_controller = Arc::new(Mutex::new(MediaController::new(
             mac_address.to_string(),
             local_mac.clone(),
@@ -229,6 +238,7 @@ impl AirPodsDevice {
 
         let aacp_manager_clone_events = aacp_manager.clone();
         let local_mac_events = local_mac.clone();
+        let airpods_mac_events = mac_address.to_string();
         let ui_tx_clone = ui_tx.clone();
         let command_tx_clone = command_tx.clone();
         tokio::spawn(async move {
@@ -340,15 +350,89 @@ impl AirPodsDevice {
                             });
                         }
                     }
-                    AACPEvent::OwnershipToFalseRequest => {
+                    AACPEvent::OwnershipToFalseRequest {
+                        other_mac,
+                        reason_reverse_tapped,
+                    } => {
                         info!(
-                            "Received ownership to false request. Setting ownership to false and pausing media."
+                            "Received ownership to false request (reverse tapped: {}). Setting ownership to false and pausing media.",
+                            reason_reverse_tapped
                         );
+                        // Prefer the sender address parsed from the smart-routing
+                        // packet; fall back to the other device reported by the
+                        // AirPods if the packet didn't carry it.
+                        let is_valid_other = |mac: &str| {
+                            !mac.eq_ignore_ascii_case("00:00:00:00:00:00")
+                                && !mac.eq_ignore_ascii_case(&local_mac_events)
+                                && !mac.eq_ignore_ascii_case(&airpods_mac_events)
+                        };
+                        let other_mac = match other_mac {
+                            Some(mac) if is_valid_other(&mac) => Some(mac),
+                            _ => {
+                                let state = aacp_manager_clone_events.state.lock().await;
+                                // Prefer the last device that was actually
+                                // streaming; the `connected_devices` list often
+                                // only contains this host.
+                                state
+                                    .last_active_audio_source
+                                    .as_ref()
+                                    .map(|source| source.mac.clone())
+                                    .filter(|mac| is_valid_other(mac))
+                                    .or_else(|| {
+                                        state
+                                            .connected_devices
+                                            .iter()
+                                            .map(|device| device.mac.clone())
+                                            .find(|mac| is_valid_other(mac))
+                                    })
+                            }
+                        };
+                        info!("Device that took over: {:?}", other_mac);
+                        let _ = ui_tx_clone.send(BluetoothUIMessage::AACPUIEvent(
+                            mac_address.to_string(),
+                            AACPEvent::OwnershipToFalseRequest {
+                                other_mac,
+                                reason_reverse_tapped,
+                            },
+                        ));
                         let _ = command_tx_clone
                             .send((ControlCommandIdentifiers::OwnsConnection, vec![0x00]));
                         let controller = mc_clone.lock().await;
                         controller.pause_all_media().await;
                         controller.deactivate_a2dp_profile().await;
+                    }
+                    AACPEvent::AudioSource(source) => {
+                        debug!("Received AudioSource event: {:?}", source);
+                        let _ = ui_tx_clone.send(BluetoothUIMessage::AACPUIEvent(
+                            mac_address.to_string(),
+                            event_clone,
+                        ));
+
+                        // If another device became the audio source, it has taken
+                        // over. Give up AACP ownership and let the UI offer the
+                        // reverse handover.
+                        if source.r#type != AudioSourceType::None
+                            && !source.mac.eq_ignore_ascii_case(&local_mac_events)
+                        {
+                            info!(
+                                "Audio source is another device ({}), giving up ownership",
+                                source.mac
+                            );
+                            let _ = ui_tx_clone.send(BluetoothUIMessage::AACPUIEvent(
+                                mac_address.to_string(),
+                                AACPEvent::OwnershipToFalseRequest {
+                                    other_mac: Some(source.mac.clone()),
+                                    reason_reverse_tapped: false,
+                                },
+                            ));
+                            let _ = command_tx_clone.send((
+                                ControlCommandIdentifiers::OwnsConnection,
+                                vec![0x00],
+                            ));
+                            let controller = mc_clone.lock().await;
+                            controller.pause_all_media().await;
+                            controller.deactivate_a2dp_profile().await;
+                        }
                     }
                     AACPEvent::StemPress(press_type, bud_type) => {
                         use crate::bluetooth::aacp::StemPressType;

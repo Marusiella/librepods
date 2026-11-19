@@ -8,7 +8,7 @@ use iced::widget::{
     Space, button, column, combo_box, container, row, rule, text, text_input, toggler,
 };
 use iced::{Background, Border, Center, Color, Length, Padding, Theme};
-use log::error;
+use log::debug;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
@@ -500,30 +500,117 @@ pub fn airpods_view<'a>(
                     })
             ];
         } else {
-            error!(
-                "Expected AirPodsInformation for device {}, got something else",
+            debug!(
+                "No AirPods information available yet for device {}",
                 mac.clone()
             );
         }
     }
 
-    container(column![
-        rename_input,
-        Space::new().height(Length::from(20)),
-        listening_mode,
-        Space::new().height(Length::from(20)),
-        audio_settings_col,
-        Space::new().height(Length::from(20)),
-        off_listening_mode_toggle,
-        Space::new().height(Length::from(20)),
-        information_col
-    ])
-    .padding(20)
-    .center_x(Length::Fill)
-    .height(Length::Fill)
+    // Show a takeover banner when another device (e.g. an iPhone) currently
+    // owns the AirPods, with a button to reverse the handover.
+    let reverse_banner = if state.ownership_lost {
+        let other_device = state
+            .other_device_mac
+            .as_deref()
+            .map(|mac| format!("another device ({})", mac))
+            .unwrap_or_else(|| "another device".to_string());
+
+        let mut reverse_button = button(
+            text(if state.reverse_in_progress {
+                "Reversing…"
+            } else {
+                "Reverse"
+            })
+            .size(14),
+        )
+        .style(|theme: &Theme, _status| {
+            let mut style = Style::default();
+            style.text_color = theme.palette().text;
+            style.background = Some(Background::Color(
+                theme.palette().primary.scale_alpha(0.4),
+            ));
+            style.border = Border::default().rounded(8.0);
+            style
+        })
+        .padding(8);
+        if !state.reverse_in_progress {
+            reverse_button = reverse_button.on_press(Message::ReverseHandover(mac.to_string()));
+        }
+
+        Some(
+            container(
+                row![
+                    column![
+                        text("AirPods switched to another device").size(16).style(
+                            |theme: &Theme| {
+                                let mut style = text::Style::default();
+                                style.color = Some(theme.palette().primary);
+                                style
+                            }
+                        ),
+                        text(format!(
+                            "Audio is on {}. Tap Reverse to take control back.",
+                            other_device
+                        ))
+                        .size(12)
+                        .style(|theme: &Theme| {
+                            let mut style = text::Style::default();
+                            style.color = Some(theme.palette().text.scale_alpha(0.7));
+                            style
+                        })
+                        .width(Length::Fill),
+                    ]
+                    .width(Length::Fill)
+                    .spacing(4),
+                    reverse_button,
+                ]
+                .align_y(Center)
+                .spacing(12),
+            )
+            .padding(Padding {
+                top: 10.0,
+                bottom: 10.0,
+                left: 14.0,
+                right: 14.0,
+            })
+            .style(|theme: &Theme| {
+                let mut style = container::Style::default();
+                style.background =
+                    Some(Background::Color(theme.palette().primary.scale_alpha(0.1)));
+                let mut border = Border::default();
+                border.color = theme.palette().primary.scale_alpha(0.5);
+                style.border = border.rounded(16);
+                style
+            }),
+        )
+    } else {
+        None
+    };
+
+    let mut content = column![];
+    if let Some(banner) = reverse_banner {
+        content = content.push(banner);
+        content = content.push(Space::new().height(Length::from(20)));
+    }
+    content = content
+        .push(rename_input)
+        .push(Space::new().height(Length::from(20)))
+        .push(listening_mode)
+        .push(Space::new().height(Length::from(20)))
+        .push(audio_settings_col)
+        .push(Space::new().height(Length::from(20)))
+        .push(off_listening_mode_toggle)
+        .push(Space::new().height(Length::from(20)))
+        .push(information_col);
+
+    container(content)
+        .padding(20)
+        .center_x(Length::Fill)
+        .height(Length::Fill)
 }
 
-fn run_async_in_thread<F>(fut: F)
+pub(crate) fn run_async_in_thread<F>(fut: F)
 where
     F: Future<Output = ()> + Send + 'static,
 {

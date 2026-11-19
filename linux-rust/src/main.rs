@@ -77,6 +77,16 @@ fn main() -> iced::Result {
     }
     env_logger::init();
 
+    // The devices file is created lazily on first run; create it up front so the
+    // UI doesn't log errors on every redraw before the backend starts.
+    let devices_path = get_devices_path();
+    if !devices_path.exists() {
+        if let Some(parent) = devices_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&devices_path, "{}");
+    }
+
     let (ui_tx, ui_rx) = unbounded_channel::<BluetoothUIMessage>();
 
     let device_managers: Arc<RwLock<HashMap<String, DeviceManagers>>> =
@@ -100,6 +110,39 @@ fn main() -> iced::Result {
 
         ui::window::start_ui(ui_rx, args.start_minimized, device_managers)
     }
+}
+
+/// Make sure a detected AirPods device shows up in the UI even on first run,
+/// when devices.json doesn't exist yet (the Add Device UI is currently disabled).
+fn register_airpods_device(mac: &str, name: &str) {
+    let path = get_devices_path();
+    let mut devices: HashMap<String, DeviceData> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    if devices.contains_key(mac) {
+        return;
+    }
+    devices.insert(
+        mac.to_string(),
+        DeviceData {
+            name: name.to_string(),
+            type_: devices::enums::DeviceType::AirPods,
+            information: None,
+        },
+    );
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_string(&devices) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                log::error!("Failed to save devices file: {}", e);
+            }
+        }
+        Err(e) => log::error!("Failed to serialize devices file: {}", e),
+    }
+    info!("Registered AirPods {} ({})", name, mac);
 }
 
 async fn async_main(
@@ -145,8 +188,13 @@ async fn async_main(
             command_tx: None,
             ui_tx: Some(ui_tx.clone()),
         };
-        let handle = tray.spawn().await.unwrap();
-        Some(handle)
+        match tray.spawn().await {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                warn!("Failed to spawn system tray (continuing without it): {}", e);
+                None
+            }
+        }
     };
 
     let session = bluer::Session::new().await?;
@@ -171,16 +219,18 @@ async fn async_main(
                 .await?
                 .unwrap_or_else(|| "Unknown".to_string());
             info!("Found connected AirPods: {}, initializing.", name);
+            register_airpods_device(&device.address().to_string(), &name);
             let airpods_device =
                 AirPodsDevice::new(device.address(), tray_handle.clone(), ui_tx.clone()).await;
 
             let mut managers = device_managers.write().await;
             // let dev_managers = DeviceManagers::with_both(airpods_device.aacp_manager.clone(), airpods_device.att_manager.clone());
             let dev_managers = DeviceManagers::with_aacp(airpods_device.aacp_manager.clone());
-            managers
+            let entry = managers
                 .entry(device.address().to_string())
-                .or_insert(dev_managers)
-                .set_aacp(airpods_device.aacp_manager);
+                .or_insert(dev_managers);
+            entry.set_aacp(airpods_device.aacp_manager);
+            entry.set_media_controller(airpods_device.media_controller);
             drop(managers);
             if let Err(e) = ui_tx.send(BluetoothUIMessage::DeviceConnected(
                 device.address().to_string(),
@@ -309,6 +359,7 @@ async fn async_main(
             .get::<String>("org.bluez.Device1", "Name")
             .unwrap_or_else(|_| "Unknown".to_string());
         info!("AirPods connected: {}, initializing", name);
+        register_airpods_device(&addr_str, &name);
         let handle_clone = tray_handle.clone();
         let ui_tx_clone = ui_tx.clone();
         let device_managers = device_managers.clone();
@@ -317,10 +368,11 @@ async fn async_main(
             let mut managers = device_managers.write().await;
             // let dev_managers = DeviceManagers::with_both(airpods_device.aacp_manager.clone(), airpods_device.att_manager.clone());
             let dev_managers = DeviceManagers::with_aacp(airpods_device.aacp_manager.clone());
-            managers
+            let entry = managers
                 .entry(addr_str.clone())
-                .or_insert(dev_managers)
-                .set_aacp(airpods_device.aacp_manager);
+                .or_insert(dev_managers);
+            entry.set_aacp(airpods_device.aacp_manager);
+            entry.set_media_controller(airpods_device.media_controller);
             drop(managers);
             if let Err(e) = ui_tx_clone.send(BluetoothUIMessage::DeviceConnected(addr_str.clone())) {
                 warn!("Failed to send DeviceConnected UI message: {:?}", e);

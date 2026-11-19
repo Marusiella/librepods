@@ -8,4 +8,5 @@ pub enum BluetoothUIMessage {
     AACPUIEvent(String, AACPEvent),        // mac, event
     ATTNotification(String, u16, Vec<u8>), // mac, handle, data
     NoOp,
+    ChannelClosed,
 }

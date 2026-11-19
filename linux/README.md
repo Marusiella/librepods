@@ -1,27 +1,107 @@
-# LibrePods on Linux
+# LibrePods on Linux (Multipoint iPhone ↔ Linux Working Fork)
 
-A new rewrite is being worked upon. Please look at the list of features in the root README to see what's supported in the new version. 
+**This fork implements full multipoint handover between iPhone and Linux for AirPods Pro 3**, including:
+- Automatic detection when iPhone takes over (pauses Linux, shows banner)
+- **Reverse button** in the UI to claim ownership back from iPhone
+- Repeated handovers work: iPhone → Linux → iPhone → Linux → …
+- The other device's MAC is read from smart-routing packets (fallback to connected-devices)
+- A2DP re-activation and playback resume on takeover
 
-The rewrite can be found in the `linux/rust` branch [here](https://github.com/kavishdevar/librepods/tree/linux/rust/linux-rust). Follow the development in [PR #241](https://github.com/kavishdevar/librepods/pull/241). 
+## Branch & Source
 
+The working implementation is in the **`linux/rust` branch** (directory: `linux-rust/`):
+- GitHub: https://github.com/kavishdevar/librepods/tree/linux/rust/linux-rust
+- Development PR: #241
 
-## Installation
+## Quick Start (Fedora / Arch / Debian / Ubuntu)
 
-### GitHub Releases
+### Prerequisites
 
-The app is ready to download as an AppImage or an executable. You can download the latest pre-release from the [GitHub releases](https://github.com/kavishdevar/librepods/releases?q="linux-v0").
+```bash
+# Fedora
+sudo dnf install rust cargo bluez bluez-obexd pulseaudio-libs-devel openssl-devel alsa-lib-devel dbus-devel
 
-### Nightly Builds (recommended)
+# Arch / EndeavourOS
+sudo pacman -S rust bluez bluez-obex pulseaudio openssl alsa-lib dbus
 
-You can also try the latest build of the new version from the [GitHub Actions artifacts](https://github.com/kavishdevar/librepods/actions/workflows/ci-linux-rust.yml). On the latest successful workflow run, download the **librepods-x86_64.AppImage** or **librepods** binary from **Artifacts**.
+# Debian / Ubuntu
+sudo apt-get install rust cargo bluez bluez-obexd libpulse-dev libssl-dev libasound2-dev libdbus-1-dev
+```
 
+### Build & Run
 
-![new version screenshot](https://github.com/user-attachments/assets/86b3c871-89a8-4e49-861a-5119de1e1d28)
+```bash
+cd linux-rust
+cargo build --release          # or `cargo run --release -d` for debug logs
+./target/release/librepods -d  # -d = debug logs
+```
+
+> **Tip:** Use `cargo run --release -d` during testing to see multipoint logs in real time.
+
+### Make AirPods Treat Linux as an Apple Device (Required for Multipoint)
+
+Before pairing, set the Apple VendorID so AirPods present multipoint capabilities:
+
+```bash
+# Add to /etc/bluetooth/main.conf
+DeviceID = bluetooth:004C:0000:0000
+```
+
+Then restart Bluetooth and **re-pair** your AirPods (they cache this info):
+
+```bash
+sudo systemctl restart bluetooth
+# Remove AirPods from Bluetooth settings, then pair again
+```
+
+### Enable AVRCP Media Controls (Play/Pause/Skip from AirPods)
+
+**PipeWire + WirePlumber (recommended):**
+
+```bash
+mkdir -p ~/.config/wireplumber/wireplumber.conf.d
+cat > ~/.config/wireplumber/wireplumber.conf.d/51-bluez-avrcp.conf <<'EOF'
+monitor.bluez.properties = {
+  bluez5.dummy-avrcp-player = true
+}
+EOF
+systemctl --user restart wireplumber
+```
+
+**PulseAudio:**
+
+```bash
+systemctl --user enable --now mpris-proxy
+```
+
+> ⚠️ Do NOT run `mpris-proxy` with WirePlumber — it conflicts.
+
+## How the Reverse Handover Works
+
+1. **iPhone takes over** → AirPods send `OwnsConnection=0` + `AudioSource={mac: iPhone, type: Media}` → Linux pauses media, deactivates A2DP, shows banner with **Reverse** button.
+2. **You click Reverse** → Linux sends `OwnsConnection=1`, `MediaInformation(streaming_state=false)`, then `HijackReversed(target=iPhone MAC)` → AirPods switch audio to Linux → Linux reactivates A2DP, resumes playback.
+3. **iPhone takes back** → Same as step 1, banner reappears with same iPhone MAC (cached).
+4. **Click Reverse again** → Works repeatedly; the cached MAC is used if smart-routing packet isn't received in time.
+
+The iPhone will show its own "Moved to iPhone" / "Moved to Mac" prompt — confirm it there.
+
+## Troubleshooting
+
+| Issue | Fix |
+|-------|-----|
+| `Reverse` button does nothing | Run with `-d` and check logs for `ReverseHandover clicked for ...` — if missing, UI thread is blocked. |
+| iPhone doesn't auto-switch after Reverse | Ensure `DeviceID` is set, AirPods re-paired, and iPhone Bluetooth is on. |
+| A2DP activation fails | Check `bluez_output.XX_XX_XX_XX_XX_XX.1` sink exists (`pactl list sinks`). |
+| LE monitor error on startup | Non-fatal; only affects proximity/auto-connect. |
+
+## Old Version (C++/Qt)
+
+The legacy C++/Qt version is in the collapsible section below. It does **not** support multipoint reverse handover.
 
 <details>
-  <summary>README for the old version</summary>
+<summary>README for the old version (C++/Qt)</summary>
 
-# LibrePods Linux
+# LibrePods Linux (Legacy)
 
 ![screenshot](imgs/main-app.png)
 
@@ -32,7 +112,7 @@ A native Linux application to control your AirPods, with support for:
 - Battery monitoring
 - Auto play/pause on ear detection
 - Hearing Aid features
-   - Supports adjusting hearing aid- amplification, balance, tone, ambient noise reduction, own voice amplification, and conversation boost
+   - Supports adjusting hearing aid amplification, balance, tone, ambient noise reduction, own voice amplification, and conversation boost
    - Supports setting the values for left and right hearing aids (this is not a hearing test! you need to have an audiogram to set the values)
 - Seamless handoff between Android and Linux
 
@@ -41,19 +121,19 @@ A native Linux application to control your AirPods, with support for:
 1. Your phone's Bluetooth MAC address (can be found in Settings > About Device)
 2. Qt6 packages
 
-   ```bash
-   # For Arch Linux / EndeavourOS
-   sudo pacman -S qt6-base qt6-connectivity qt6-multimedia-ffmpeg qt6-multimedia
+    ```bash
+    # For Arch Linux / EndeavourOS
+    sudo pacman -S qt6-base qt6-connectivity qt6-multimedia-ffmpeg qt6-multimedia
 
-   # For Debian
-   sudo apt-get install qt6-base-dev qt6-declarative-dev qt6-connectivity-dev qt6-multimedia-dev \
-        qml6-module-qtquick-controls qml6-module-qtqml-workerscript qml6-module-qtquick-templates \
-        qml6-module-qtquick-window qml6-module-qtquick-layouts
+    # For Debian
+    sudo apt-get install qt6-base-dev qt6-declarative-dev qt6-connectivity-dev qt6-multimedia-dev \
+         qml6-module-qtquick-controls qml6-module-qtqml-workerscript qml6-module-qtquick-templates \
+         qml6-module-qtquick-window qml6-module-qtquick-layouts
 
-    # For Fedora
-    sudo dnf install qt6-qtbase-devel qt6-qtconnectivity-devel \
-        qt6-qtmultimedia-devel qt6-qtdeclarative-devel
-   ```
+     # For Fedora
+     sudo dnf install qt6-qtbase-devel qt6-qtconnectivity-devel \
+         qt6-qtmultimedia-devel qt6-qtdeclarative-devel
+    ```
 3. OpenSSL development headers
 
     ```bash
@@ -95,18 +175,18 @@ A native Linux application to control your AirPods, with support for:
 
 1. Build the application:
 
-   ```bash
-   mkdir build
-   cd build
-   cmake ..
-   make -j $(nproc)
-   ```
+    ```bash
+    mkdir build
+    cd build
+    cmake ..
+    make -j $(nproc)
+    ```
 
 2. Run the application:
 
-   ```bash
-   ./librepods
-   ```
+    ```bash
+    ./librepods
+    ```
 
 ## Troubleshooting
 

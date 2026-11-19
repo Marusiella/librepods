@@ -1,5 +1,6 @@
 use crate::bluetooth::aacp::AACPManager;
 use crate::bluetooth::aacp::EarDetectionStatus;
+use crate::bluetooth::aacp::AudioSourceType;
 use dbus::arg::RefArg;
 use dbus::blocking::Connection;
 use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
@@ -144,6 +145,33 @@ impl MediaController {
                     .contains(&EarDetectionStatus::InEar)
                 {
                     info!("Media playback started but buds not in ear, skipping takeover");
+                    continue;
+                }
+                // The AirPods emit transient `AudioSource { type: None }`
+                // packets while switching, so use the last source that was
+                // actually streaming. While another device is streaming and we
+                // don't own the connection, don't steal the AirPods behind the
+                // user's back -- the Reverse button is the explicit way back.
+                let recent_foreign_source = match (
+                    aacp_state.last_active_audio_source.as_ref(),
+                    aacp_state.last_active_audio_source_at,
+                ) {
+                    (Some(source), Some(at))
+                        if source.r#type != AudioSourceType::None
+                            && !source.mac.eq_ignore_ascii_case(&local_mac)
+                            && at.elapsed() < Duration::from_secs(15) =>
+                    {
+                        Some(source.mac.clone())
+                    }
+                    _ => None,
+                };
+                if let Some(foreign_mac) = recent_foreign_source
+                    && !aacp_state.owns
+                {
+                    info!(
+                        "Another device is the active audio source ({}), skipping takeover (use Reverse to take over)",
+                        foreign_mac
+                    );
                     continue;
                 }
                 info!("Media playback started, taking ownership and activating a2dp");
@@ -510,6 +538,16 @@ impl MediaController {
         } else {
             error!("Failed to resume any media players via DBus");
         }
+    }
+
+    /// Resume players that LibrePods paused (e.g. after a device takeover).
+    pub async fn resume_playback(&self) {
+        self.resume().await;
+    }
+
+    /// The Bluetooth MAC address of the local adapter used for AACP packets.
+    pub async fn local_mac(&self) -> String {
+        self.state.lock().await.local_mac.clone()
     }
 
     pub async fn next_track(&self) {

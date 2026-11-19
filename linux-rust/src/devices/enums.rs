@@ -52,12 +52,21 @@ impl Display for DeviceState {
 #[derive(Clone, Debug)]
 pub struct AirPodsState {
     pub device_name: String,
+    /// Bluetooth address of this machine's adapter, used to tell whether the
+    /// active audio source is us or another device.
+    pub local_mac: String,
     pub noise_control_mode: AirPodsNoiseControlMode,
     pub noise_control_state: combo_box::State<AirPodsNoiseControlMode>,
     pub conversation_awareness_enabled: bool,
     pub personalized_volume_enabled: bool,
     pub allow_off_mode: bool,
     pub battery: Vec<BatteryInfo>,
+    /// True when another device (e.g. an iPhone) currently owns the AirPods.
+    pub ownership_lost: bool,
+    /// MAC of the other connected device that took ownership, when known.
+    pub other_device_mac: Option<String>,
+    /// True while a reverse handover request is in flight.
+    pub reverse_in_progress: bool,
 }
 
 #[derive(Clone, Debug)]
