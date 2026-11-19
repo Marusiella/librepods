@@ -1,5 +1,7 @@
 # LibrePods on Linux (Multipoint iPhone ↔ Linux Working Fork)
 
+> ⚠️ **Use at your own risk.** This is a development branch with experimental multipoint handover logic. It may cause unexpected Bluetooth behavior, audio glitches, or require re-pairing. Test on a non-critical setup first.
+
 **This fork implements full multipoint handover between iPhone and Linux for AirPods Pro 3**, including:
 - Automatic detection when iPhone takes over (pauses Linux, shows banner)
 - **Reverse button** in the UI to claim ownership back from iPhone
