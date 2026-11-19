@@ -45,7 +45,7 @@ LibrePods allows you to use AirPods features that are exclusive to Apple devices
 | Automatically connect to AirPods                            | ✅     | ✅       |
 | Hearing Aid                                                 | 🔴     | ⚪       |
 | Transparency Mode customization                             | 🔴     | ⚪       |
-| Multi-device connectivity (Bluetooth Multipoint; 2 devices only) | ⚪     | ⚪       |
+| Multi-device connectivity (Bluetooth Multipoint; 2 devices only) | ✅     | ⚪       |
 | <details><summary>Other accessibility configs (click to expand)</summary><ul><li>Press speed</li><li>Press and Hold duration</li><li>Noise Cancellation with single AirPod</li><li>Volume control on swipe</li><li>Volume swipe speed</li></ul></details>       | 🔴     | ✅       |
 | <details><summary>Other general configs</summary><ul><li>Press and Hold to cycle between listening modes/invoke digital assistant (invoking digital assistant needs a recent firmware)</li><li>Configure call controls</li><li>Personalized volume</li><li>Loud Sound Reduction (needs <a href="#vendorid-spoofing">VendorID spoofing</a>)</li><li>Microphone side</li><li>Pause media when falling asleep (needs a recent firmware)</li><li>Enable <code>Off listening mode</code> to switch to <code>Off</code></li></ul></details>                   | 🔴     | ✅       |
 | [Head-tracked Spatial Audio](#spatial-audio)                | ❓     | ❓       |
@@ -113,6 +113,34 @@ You can do this on Linux by editing the DeviceID in `/etc/bluetooth/main.conf`. 
 ## Multi-device Connectivity
 
 Upto two devices can be simultaneously connected to AirPods, for audio and control both. Seamless connection switching. The same notification shows up on Apple device when Android takes over the AirPods as if it were an Apple device ("Move to iPhone"). Android also shows a popup when the other device takes over.
+
+### Linux (working implementation)
+
+The **`linux/rust` branch** contains a complete multipoint handover implementation for iPhone ↔ Linux:
+
+- **Automatic detection** when iPhone takes over (pauses Linux, shows banner)
+- **Reverse button** in the UI to claim ownership back from iPhone
+- **Repeated handovers work**: iPhone → Linux → iPhone → Linux → …
+- Other device's MAC read from smart-routing packets (fallback to connected-devices)
+- A2DP re-activation and playback resume on takeover
+
+> ⚠️ **Use at your own risk.** This is a development branch with experimental multipoint handover logic. It may cause unexpected Bluetooth behavior, audio glitches, or require re-pairing. Test on a non-critical setup first.
+
+**Quick start:**
+```bash
+cd linux-rust
+cargo build --release
+./target/release/librepods -d
+```
+
+**Prerequisites:** Set Apple VendorID before pairing (required for multipoint):
+```bash
+# /etc/bluetooth/main.conf
+DeviceID = bluetooth:004C:0000:0000
+```
+Then `sudo systemctl restart bluetooth` and re-pair AirPods.
+
+See [linux/README.md](/linux/README.md) for full build instructions, AVRCP setup, and troubleshooting.
 
 ## Accessibility Settings and Hearing Aid
 
