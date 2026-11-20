@@ -60,6 +60,8 @@ pub struct AirPodsState {
     pub conversation_awareness_enabled: bool,
     pub personalized_volume_enabled: bool,
     pub allow_off_mode: bool,
+    /// Local capture state of the proprietary hi-res microphone (UI-driven).
+    pub hires_mic_enabled: bool,
     pub battery: Vec<BatteryInfo>,
     /// True when another device (e.g. an iPhone) currently owns the AirPods.
     pub ownership_lost: bool,
