@@ -1020,7 +1020,26 @@ impl AACPManager {
                 // packet needs it.
                 drop(state);
                 save_devices_json(json).await;
-                info!("Received Information: {:?}", info);
+                // `info` derives Debug, which would print the IRK/encryption key.
+                // They are secret (device identity + BLE broadcast decryption),
+                // so log every other field explicitly and redact the keys.
+                info!(
+                    "Received Information: name={:?}, model={:?}, manufacturer={:?}, \
+                     serial={:?}, version1={:?}, version2={:?}, hardware={:?}, \
+                     updater={:?}, left_serial={:?}, right_serial={:?}, version3={:?}, \
+                     le_keys=<redacted>",
+                    info.name,
+                    info.model_number,
+                    info.manufacturer,
+                    info.serial_number,
+                    info.version1,
+                    info.version2,
+                    info.hardware_revision,
+                    info.updater_identifier,
+                    info.left_serial_number,
+                    info.right_serial_number,
+                    info.version3
+                );
             }
 
             opcodes::PROXIMITY_KEYS_RSP => {
