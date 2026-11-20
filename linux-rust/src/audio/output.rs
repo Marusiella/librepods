@@ -366,6 +366,7 @@ pub fn source_consumer(name: &str) -> SourceUse {
                 if let ListResult::Item(item) = result {
                     if item.source == idx
                         && item.sample_spec.rate >= MIN_RECORDER_RATE
+                        && !item.corked
                         && app.borrow().is_none()
                     {
                         let label = item
@@ -598,6 +599,7 @@ fn list_recorders() -> Vec<(Recorder, u32)> {
         move |result| {
             if let ListResult::Item(item) = result
                 && item.sample_spec.rate >= MIN_RECORDER_RATE
+                && !item.corked
             {
                 let app = item
                     .proplist

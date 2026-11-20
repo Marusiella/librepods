@@ -26,11 +26,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(400);
 /// is considered stalled and the capture is torn down and restarted.
 const STALL_TIMEOUT: Duration = Duration::from_millis(2000);
 /// How long the AirPods mic stream keeps running after the last app stopped
-/// recording. Every STOP needs an A2DP reset (a short audible dip), and apps
-/// close and reopen the mic often: push-to-talk dictation does it for every
-/// sentence, voice chat apps when rejoining a call or changing settings.
-/// Lingering turns a burst of open/close into one START and one STOP.
-const RECORDER_GONE_GRACE: Duration = Duration::from_secs(60);
+/// recording. Every STOP needs an A2DP reset (a short audible dip), so keep a
+/// short grace for push-to-talk bursts and apps that briefly reopen the mic,
+/// but stop soon after the user is actually done.
+const RECORDER_GONE_GRACE: Duration = Duration::from_secs(10);
 /// Upper bound for the delay between stall restarts that keep failing.
 const MAX_RESTART_BACKOFF: Duration = Duration::from_secs(30);
 /// After this many restarts in a row without audio the headset profile takes
@@ -461,6 +460,10 @@ async fn monitor_loop(
             recorder_gone_since = None;
         } else if capture.is_some() && recorder_gone_since.is_none() {
             recorder_gone_since = Some(Instant::now());
+            info!(
+                "[hires] recorder stopped; keeping capture for {}s in case it reopens",
+                RECORDER_GONE_GRACE.as_secs()
+            );
         }
         let in_grace = capture.is_some()
             && recorder_gone_since.is_some_and(|t| t.elapsed() < RECORDER_GONE_GRACE);
