@@ -11,7 +11,6 @@ use hex;
 use log::{debug, info};
 use serde_json;
 use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
